@@ -17,11 +17,16 @@
 package org.springframework.web.servlet.function;
 
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileSystemResource;
@@ -115,6 +120,27 @@ class PathResourceLookupFunctionTests {
 	void withFileSystemResource() {
 		FileSystemResource location = new FileSystemResource("/static/");
 		assertThatNoException().isThrownBy(() -> new PathResourceLookupFunction("/resources/**", location));
+	}
+
+	@ParameterizedTest  // gh-36693
+	@ValueSource(strings = {
+			"web-inf/secret.txt",
+			"Meta-Inf/secret.txt",
+			"%77eb-inf/secret.txt"
+	})
+	void fileSystemResourceLocationWithWebInfOrMetaInfIgnoringCase(String path, @TempDir Path tempDir) throws Exception {
+		Path staticDir = Files.createDirectories(tempDir.resolve("static"));
+		Files.writeString(staticDir.resolve("public.txt"), "public");
+		Files.writeString(Files.createDirectories(staticDir.resolve("web-inf")).resolve("secret.txt"), "secret");
+		Files.writeString(Files.createDirectories(staticDir.resolve("Meta-Inf")).resolve("secret.txt"), "secret");
+		Resource location = new FileSystemResource(staticDir.toString() + "/");
+		PathResourceLookupFunction function = new PathResourceLookupFunction("/resources/**", location);
+
+		Optional<Resource> result = function.apply(initRequest("GET", "/resources/public.txt"));
+		assertThat(result).isPresent();
+
+		result = function.apply(initRequest("GET", "/resources/" + path));
+		assertThat(result).isNotPresent();
 	}
 
 }

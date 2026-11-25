@@ -18,16 +18,23 @@ package org.springframework.web.reactive.function.server;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
+import org.springframework.http.HttpMethod;
 import org.springframework.web.testfixture.http.server.reactive.MockServerHttpRequest;
 import org.springframework.web.testfixture.server.MockServerWebExchange;
 
@@ -137,6 +144,37 @@ class PathResourceLookupFunctionTests {
 	void withFileSystemResource() {
 		FileSystemResource location = new FileSystemResource("/static/");
 		assertThatNoException().isThrownBy(() -> new PathResourceLookupFunction("/resources/**", location));
+	}
+
+	@ParameterizedTest  // gh-36693
+	@ValueSource(strings = {
+			"web-inf/secret.txt",
+			"Meta-Inf/secret.txt",
+			"%77eb-inf/secret.txt"
+	})
+	void fileSystemResourceLocationWithWebInfOrMetaInfIgnoringCase(String path, @TempDir Path tempDir) throws Exception {
+		Path staticDir = Files.createDirectories(tempDir.resolve("static"));
+		Files.writeString(staticDir.resolve("public.txt"), "public");
+		Files.writeString(Files.createDirectories(staticDir.resolve("web-inf")).resolve("secret.txt"), "secret");
+		Files.writeString(Files.createDirectories(staticDir.resolve("Meta-Inf")).resolve("secret.txt"), "secret");
+		Resource location = new FileSystemResource(staticDir.toString() + "/");
+		PathResourceLookupFunction function = new PathResourceLookupFunction("/resources/**", location);
+
+		StepVerifier.create(function.apply(initRequest("/resources/public.txt")))
+				.expectNextCount(1)
+				.expectComplete()
+				.verify();
+
+		StepVerifier.create(function.apply(initRequest("/resources/" + path)))
+				.expectComplete()
+				.verify();
+	}
+
+	private static ServerRequest initRequest(String path) {
+		// Use a URI as is, i.e. without encoding, to retain the encoded characters of the path
+		MockServerHttpRequest mockRequest =
+				MockServerHttpRequest.method(HttpMethod.GET, URI.create("https://localhost" + path)).build();
+		return new DefaultServerRequest(MockServerWebExchange.from(mockRequest), Collections.emptyList());
 	}
 
 }

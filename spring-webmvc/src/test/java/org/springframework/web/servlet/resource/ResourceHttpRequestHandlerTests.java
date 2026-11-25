@@ -17,6 +17,8 @@
 package org.springframework.web.servlet.resource;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 
 import jakarta.servlet.http.HttpServletResponse;
@@ -24,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileSystemResource;
@@ -35,11 +38,13 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.accept.ContentNegotiationManager;
 import org.springframework.web.accept.ContentNegotiationManagerFactoryBean;
+import org.springframework.web.context.support.ServletContextResource;
 import org.springframework.web.context.support.StaticWebApplicationContext;
 import org.springframework.web.servlet.HandlerMapping;
 import org.springframework.web.testfixture.servlet.MockHttpServletRequest;
 import org.springframework.web.testfixture.servlet.MockHttpServletResponse;
 import org.springframework.web.testfixture.servlet.MockServletContext;
+import org.springframework.web.util.ServletRequestPathUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -663,6 +668,82 @@ class ResourceHttpRequestHandlerTests {
 			testInvalidPath("/../.." + secretPath);
 			testInvalidPath("/%2E%2E/testsecret/secret.txt");
 			testInvalidPath("/%2E%2E/testsecret/secret.txt");
+		}
+
+		@Test  // gh-36698
+		void shouldRejectTraversalRevealedByRemovingVersion(@TempDir Path tempDir) throws Exception {
+			Path location = Files.createDirectories(tempDir.resolve("static"));
+			Files.writeString(location.resolve("public.txt"), "public");
+			Files.writeString(tempDir.resolve("secret.txt"), "secret");
+			Files.writeString(tempDir.resolve("secret"), "secret");
+			ContentVersionStrategy strategy = new ContentVersionStrategy();
+			String publicVersion = strategy.getResourceVersion(new FileSystemResource(location.resolve("public.txt")));
+			String version = strategy.getResourceVersion(new FileSystemResource(tempDir.resolve("secret.txt")));
+
+			VersionResourceResolver versionResolver = new VersionResourceResolver();
+			versionResolver.addContentVersionStrategy("/**");
+			this.handler.setLocations(List.of(new FileSystemResource(location.toString() + "/")));
+			this.handler.setResourceResolvers(List.of(versionResolver, new PathResourceResolver()));
+			this.handler.afterPropertiesSet();
+
+			String publicPath = "public-" + publicVersion + ".txt";
+			this.request = new MockHttpServletRequest(new TestServletContext(), "GET", "/resources/" + publicPath);
+			ServletRequestPathUtils.parseAndCache(this.request);
+			this.request.setAttribute(HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE, publicPath);
+			this.response = new MockHttpServletResponse();
+			this.handler.handleRequest(this.request, this.response);
+			assertThat(this.response.getStatus()).isEqualTo(200);
+			assertThat(this.response.getContentAsString()).isEqualTo("public");
+
+			for (String path : List.of(
+					".-" + version + "./secret-" + version + ".txt",
+					".-" + version + "./secret",
+					"%2e-" + version + ".%2fsecret%2etxt")) {
+				this.request = new MockHttpServletRequest(new TestServletContext(), "GET", "/resources/" + path);
+				ServletRequestPathUtils.parseAndCache(this.request);
+				this.request.setAttribute(HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE, path);
+				this.response = new MockHttpServletResponse();
+				assertNotFound();
+				assertThat(this.response.getContentAsString()).doesNotContain("secret");
+			}
+		}
+
+		@Test  // gh-36693
+		void shouldRejectWebInfAndMetaInfIgnoringCase(@TempDir Path tempDir) throws Exception {
+			Path location = Files.createDirectories(tempDir.resolve("static"));
+			Files.writeString(location.resolve("public.txt"), "public");
+			Files.writeString(Files.createDirectories(location.resolve("web-inf")).resolve("secret.txt"), "secret");
+			Files.writeString(Files.createDirectories(location.resolve("Meta-Inf")).resolve("secret.txt"), "secret");
+
+			this.handler.setLocations(List.of(new FileSystemResource(location.toString() + "/")));
+			this.handler.afterPropertiesSet();
+
+			this.request = new MockHttpServletRequest(new TestServletContext(), "GET", "/resources/public.txt");
+			ServletRequestPathUtils.parseAndCache(this.request);
+			this.request.setAttribute(HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE, "public.txt");
+			this.response = new MockHttpServletResponse();
+			this.handler.handleRequest(this.request, this.response);
+			assertThat(this.response.getContentAsString()).isEqualTo("public");
+
+			for (String path : List.of("web-inf/secret.txt", "Meta-Inf/secret.txt", "%77eb-inf/secret.txt")) {
+				this.request = new MockHttpServletRequest(new TestServletContext(), "GET", "/resources/" + path);
+				ServletRequestPathUtils.parseAndCache(this.request);
+				this.request.setAttribute(HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE, path);
+				this.response = new MockHttpServletResponse();
+				assertNotFound();
+				assertThat(this.response.getContentAsString()).doesNotContain("secret");
+			}
+		}
+
+		@Test  // gh-36693
+		void servletContextRootLocationIsNotRejected() throws Exception {
+			TestServletContext servletContext = new TestServletContext();
+			Resource location = new ServletContextResource(servletContext, "/");
+			this.handler.setLocations(List.of(location));
+			this.handler.setServletContext(servletContext);
+			this.handler.afterPropertiesSet();
+
+			assertThat(this.handler.getLocations()).containsExactly(location);
 		}
 
 		private void testInvalidPath(String requestPath) {
